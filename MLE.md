@@ -28,6 +28,32 @@
 
 1.17
 
+# Instant NGP
+
+​	•	**NeRF 依赖大 MLP 来拟合整个 3D 场景**，即 MLP 必须学习每个位置的特征。
+
+​	•	**即使相邻的点，MLP 也要重新计算**，导致计算量非常大。
+
+hash编码+tiny mlp
+
+**不让 MLP 直接学习每个 3D 点的特征**，而是**用哈希表存储空间信息**。
+
+**将 3D 坐标 (x, y, z) 直接映射到哈希表的索引**，然后快速查找特征。
+
+**MLP 只需要处理局部插值，而不需要学习整个 3D 场景**。
+
+**传统 NeRF 的 MLP 需要自己记住每个点的特征**，但哈希编码使用哈希表来存储**大部分空间信息**，MLP 只需要处理局部细节，计算量更小！
+
+# GIRAFFE
+
+![image-20250116232134063](/Users/chenhaoyang/Library/Application Support/typora-user-images/image-20250116232134063.png)
+
+<img src="/Users/chenhaoyang/Library/Application Support/typora-user-images/image-20250116232252739.png" alt="image-20250116232252739" style="zoom:50%;" />
+
+# Latent nerf
+
+
+
 # Conception
 
 ### Weights网格参数
@@ -266,11 +292,15 @@ np.linalg.norm(x,ord=2)
 
 **BN** 将整个小批量数据归一化,需要考虑batch
 
-#### Group Normalization
+#### Group Normalization （CNN比较多）
 
 **GN** 将特征分为多个组，分别归一化
 
 也就是不分数据,而分features
+
+在每个样本的组内通道归一化
+
+如果有 **C=8 个通道，G=2 组**，GN  **每 4 个通道为一组**
 
 ```python
 import torch
@@ -285,7 +315,11 @@ output = group_norm(x)
 print(output.shape)  # 输出形状与输入相同
 ```
 
+### LayerNorm
 
+一个sample的所有feature进行归一化
+
+**Transformer / NLP / RNN** 适用于序列任务，独立于 batch
 
 # Backpropagation
 
@@ -405,7 +439,29 @@ In transform, it use self-attention
 
 **BERT（Bidirectional Encoder Representations from Transformers）** 的架构主要基于 **Transformer 的 Encoder 部分**
 
+encoder 适合 NLP 理解任务（如分类、NER、QA）
+
+**输入：** 一个 token 序列
+
+1. 先加上 **Positional Encoding**（如 Sinusoidal 或 RoPE）
+2. 进入多个 **Self-Attention 层**
+3. 进入多个 **Feed Forward 层**
+4. 经过 **Norm（LN）+ 残差连接**
+
+**输出：** 经过 Transformer Encoder 处理后的特征表示，每个 token 变成一个高维向量。
+
 #### Decoder
+
+Decoder-only（GPT）适合 NLP 生成任务（如聊天机器人、文本生成）
+
+**Transformer Decoder 的输入 = "目标序列的前一部分" + "Encoder 的输出"**
+（即 Decoder 通过 **自回归方式** 生成新 token，并使用 Encoder 信息）
+
+inference 阶段，输入就是一次生成一个的，然后作为输入这样recursive的输出
+
+在train阶段，输入就是翻译后的完整ground truth sequence，所以需要mask来遮住未来信息
+
+
 
 #### Cross Attention
 
@@ -446,6 +502,10 @@ masked self-attention
 
 
 # ML Coding
+
+`nn.Identity()` 等价于一个“空操作”，即 $\text{output} = \text{input}$
+
+
 
 ### n次硬币向上概率
 
@@ -667,12 +727,110 @@ def train_neuron_torch(
 
 ### Regularization 
 
-Prevent the model  from doing too well on training data
+Prevent the model  from doing too well on training data 
+
+> **防止模型过拟合**, overfitting! add regularization into Loss function，使得模型的参数不会过于复杂，从而提升模型的泛化能力
 
 Why regularize?
 
 - Express preferences over weights  
-- Make the model simple so it works on test data 
-- Improve optimization by adding curvature
+- **Make the model simple** so it works on test data 
+- **Improve optimization** by adding curvature
+
+MSE和L2 regularization很像，但是不一样，MSE要/N！但是L2不用，只求和
+
+**L1 正则化**让部分权重变成 0，进行特征选择，维度较高的数据，特征冗余较多
+
+**L2 正则化**让权重变小但不为 0，使模型更平滑，一般的深度学习任务，防止过拟合
+
+**Elastic Net**结合 L1 和 L2，兼顾特征选择和稳定性，高维稀疏数据，如文本处理
+
+手动添加
+
+```python
+sum(p.abs().sum() for p in model.parameters())#计算所有参数的 L1 范数。
+l2_lambda = 0.01
+l2_norm = sum((p ** 2).sum() for p in model.parameters())  # 计算所有参数的 L2 范数
+loss = loss + l2_lambda * l2_norm  # 添加 L2 正则项
+```
+
+使用pytorch自带的 weight_decay（L2 正则化）
+
+**不支持 L1 正则化**，需要手动添加
+
+```python
+optimizer = optim.SGD(model.parameters(), lr=0.01, weight_decay=0.01)
+```
+
+`weight_decay=0.01`
 
 ### Dropout
+
+Dropout层一般放置在**激活函数之后**
+
+```python
+self.relu(x)
+self.dropout1(x)
+```
+
+### Llama 和Transformer区别
+
+transformer是绝对位置编码
+
+```
+t,2i=sin(t/(10000/(2i/d)))
+t,2i+1=cos(t/(10000/(2i/d)))
+```
+
+$PE_{t+k}=f(PE_t,k)$
+
+三角函数位置编码是相对位置k的**线性变换**
+
+相当于d/2个空格的时钟里每个位置就是占一格
+
+Llama是旋转位置编码**ROPE**
+
+M旋转矩阵是顺时针旋转
+$$
+M=\left[\begin{array}{ll}
+u_1 & v_1 \\
+u_2 & v_2
+\end{array}\right]=\left[\begin{array}{cc}
+\cos \left(\theta_j \cdot k\right) & \sin \left(\theta_j \cdot k\right) \\
+-\sin \left(\theta_j \cdot k\right) & \cos \left(\theta_j \cdot k\right)
+\end{array}\right]
+$$
+![](./MLE/19.png)
+
+Q，K
+
+计算旋转位置编码
+
+两两一组旋转变换
+
+再计算QK
+
+
+
+总结
+
+* 位置编码
+* Norm技术
+* GQA group query attention 不同
+
+![](./MLE/20.png)
+
+### 外推性
+
+外推性是指大模型在训练时和预测时的输入长度不一致，导致模型的泛化能力下降的问题。例如，如果一个模型在训练时只使用了512个 token 的文本，那么在预测时如果输入超过512个 token，模型可能无法正确处理。这就限制了大模型在处理长文本或多轮对话等任务时的效果
+
+RoPE可以增强外推性
+
+### SGD+Momentu
+
+### RMSProp
+
+### Adam and AdamW?
+
+Beta1=0.99
+
